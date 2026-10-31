@@ -1,4 +1,4 @@
-"""PSH test-site replacement app.py: richer feedback and four questions.
+"""PSH test-site replacement app.py: feedback, four questions, Word download.
 
 Uses the existing dependencies and secrets. No payment or email integration.
 """
@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 
 import streamlit as st
 from openai import OpenAI
@@ -71,6 +72,10 @@ For each major opportunity, explain the precise concern or artistic choice,
 its evidence, why it matters to this play, important contrary evidence, and
 a bounded revision or rehearsal experiment. Explain what the writer could
 look or listen for to judge whether the experiment helps.
+Give the playwright a concrete revision step they can try on their own first.
+If a reading or rehearsal would add value, describe it as an optional follow-up,
+not the only way to act on the advice. Keep those steps proportionate to the
+play's scale and the writer's likely access to collaborators.
 
 When two directions are viable, explain their different effects and tradeoff.
 Do not mechanically provide alternatives for every note. Suggestions can mean
@@ -126,7 +131,8 @@ say so briefly. Do not repeat a major priority.
 5. Where I'd start
 Give one manageable first step drawn from an earlier priority: the passage or
 pattern, a practical action, and what to evaluate afterward. Keep it achievable
-in a revision session or short reading. Approximately 60-100 words when needed.
+alone in a revision session; an optional short reading may follow. Approximately
+60-100 words when needed.
 Do not repeat the report or prescribe a long revision program.
 
 Your questions answered
@@ -240,6 +246,65 @@ def generate_feedback(client, model: str, payload: dict) -> str:
     return feedback
 
 
+def make_word_report(feedback: str) -> bytes:
+    """Convert the report's headings, paragraphs, and simple emphasis to Word."""
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Inches(0.8)
+    section.bottom_margin = Inches(0.8)
+    section.left_margin = Inches(0.9)
+    section.right_margin = Inches(0.9)
+
+    normal = document.styles["Normal"]
+    normal.font.name = "Aptos"
+    normal.font.size = Pt(11)
+    normal.paragraph_format.space_after = Pt(8)
+
+    for name in ("Title", "Heading 1", "Heading 2", "Heading 3"):
+        document.styles[name].font.color.rgb = RGBColor(0, 0, 0)
+    title_style = document.styles["Title"]
+    title_style.font.size = Pt(18)
+    title_borders = title_style.element.pPr.find(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pBdr"
+    )
+    if title_borders is not None:
+        title_style.element.pPr.remove(title_borders)
+
+    document.add_heading("Your play feedback", level=0)
+
+    def add_inline(paragraph, content: str) -> None:
+        # The report uses Markdown **bold** and *italic* for short emphasis.
+        for part in re.split(r"(\*\*[^*\n]+\*\*|\*[^*\n]+\*)", content):
+            if part.startswith("**") and part.endswith("**"):
+                paragraph.add_run(part[2:-2]).bold = True
+            elif part.startswith("*") and part.endswith("*"):
+                paragraph.add_run(part[1:-1]).italic = True
+            else:
+                paragraph.add_run(part)
+
+    for block in re.split(r"\n\s*\n", feedback.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        for line in lines:
+            heading = re.match(r"^(#{1,3})\s+(.+)$", line)
+            if heading:
+                paragraph = document.add_heading(level=min(len(heading.group(1)), 3))
+                add_inline(paragraph, heading.group(2))
+            elif line.startswith("- "):
+                add_inline(document.add_paragraph(style="List Bullet"), line[2:])
+            elif re.match(r"^\d+\.\s+", line):
+                add_inline(document.add_paragraph(style="List Number"),
+                           re.sub(r"^\d+\.\s+", "", line, count=1))
+            else:
+                add_inline(document.add_paragraph(), line)
+
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
 def main() -> None:
     st.title("Play Feedback")
     st.write("Upload your play for detailed feedback on its strengths, revision opportunities, and your specific questions.")
@@ -297,6 +362,13 @@ def main() -> None:
         st.divider()
         st.subheader("Your feedback")
         st.markdown(st.session_state["psh_feedback"])
+        st.download_button(
+            "Download feedback as Word document",
+            data=make_word_report(st.session_state["psh_feedback"]),
+            file_name="Play_Feedback.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            on_click="ignore",
+        )
 
     st.caption("Private test prototype. Uploaded plays are sent to the AI provider for processing. This app retains the current report in your session but does not save plays or reports to a database.")
 
